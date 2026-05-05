@@ -1,0 +1,61 @@
+name: ci-cd
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install deps
+        run: pip install -r requirements-dev.txt
+
+      - name: Lint
+        run: flake8 app bot
+
+      - name: Test
+        run: pytest
+
+      - name: Build Docker
+        run: docker build -t recommender:latest .
+
+  deploy:
+    needs: build-test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to registry
+        run: echo "${{ secrets.CR_PAT }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Build & push
+        run: |
+          docker build -t ghcr.io/${{ github.repository_owner }}/recommender:latest .
+          docker push ghcr.io/${{ github.repository_owner }}/recommender:latest
+
+      - name: Deploy
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          echo "$SSH_KEY" > /tmp/key && chmod 600 /tmp/key
+          ssh -i /tmp/key -o StrictHostKeyChecking=no $USER@$HOST "
+            docker pull ghcr.io/${{ github.repository_owner }}/recommender:latest &&
+            docker stop rec 2>/dev/null || true &&
+            docker rm rec 2>/dev/null || true &&
+            docker run -d -p 8000:8000 --name rec ghcr.io/${{ github.repository_owner }}/recommender:latest
+          "
+          rm /tmp/key
